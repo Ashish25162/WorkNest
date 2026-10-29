@@ -1,0 +1,16 @@
+{
+  "short_name": "GigMap",
+  "name": "GigMap On-Demand Dispatch",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#060913",
+  "theme_color": "#060913",
+  "display": "standalone",
+  "orientation": "portrait"
+}

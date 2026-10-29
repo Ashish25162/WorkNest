@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>WorkNest - Real-time On-Demand Service Dispatch & Tracking</title>
+    <meta name="description" content="WorkNest is a real-time booking and dispatch platform connecting local citizens with professional service providers like electricians, plumbers, and maintenance specialists with dynamic, time-based pricing and admin commission settlements." />
+    
+    <!-- PWA Settings -->
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#060913" />
+    <link rel="apple-touch-icon" href="/favicon.svg" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+    
+    <!-- Automatically clear any legacy service worker cache from old Google Maps build -->
+    <script>
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(registrations => {
+          for (const reg of registrations) {
+            reg.unregister();
+            console.log('[WorkNest] Cleared legacy service worker:', reg);
+          }
+        });
+        if ('caches' in window) {
+          caches.keys().then(keys => {
+            for (const key of keys) {
+              caches.delete(key);
+              console.log('[WorkNest] Cleared legacy cache:', key);
+            }
+          });
+        }
+      }
+    </script>
+  </body>
+</html>
