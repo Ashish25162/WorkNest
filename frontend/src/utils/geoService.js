@@ -1,3 +1,7 @@
+const PHOTON_BASE = import.meta.env.DEV ? '/_geo/photon' : 'https://photon.komoot.io';
+const NOMINATIM_BASE = import.meta.env.DEV ? '/_geo/nominatim' : 'https://nominatim.openstreetmap.org';
+const METEO_BASE = import.meta.env.DEV ? '/_geo/meteo' : 'https://geocoding-api.open-meteo.com';
+
 /**
  * Robust Multi-Provider Geocoding Service for WorkNest
  * Features:
@@ -27,6 +31,9 @@ export async function smartSearchLocation(rawQuery, biasCoords = null) {
   if (!query) return null;
 
   const bias = biasCoords || DEFAULT_INDIA_BIAS;
+  let matches = [];
+  try { matches = await getLiveSearchSuggestions(query, bias); } catch { /* Try the explicit-search fallbacks below. */ }
+  if (matches.length) return matches[0];
 
   // 1. Check if query is a 6-digit Indian Postal PIN Code
   if (/^\d{6}$/.test(query)) {
@@ -86,7 +93,7 @@ export async function smartSearchLocation(rawQuery, biasCoords = null) {
   // 4. Try Open-Meteo Geocoding API (Fast worldwide cities, towns & landmarks)
   try {
     const omRes = await fetch(
-      `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=5&language=en&format=json`,
+      `${METEO_BASE}/v1/search?name=${encodeURIComponent(query)}&count=5&language=en&format=json`,
       { signal: AbortSignal.timeout(3000) }
     );
     if (omRes.ok) {
@@ -104,10 +111,10 @@ export async function smartSearchLocation(rawQuery, biasCoords = null) {
   // 5. Try Nominatim with exact query and 3.5s timeout
   try {
     const res = await fetch(
-      `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&countrycodes=in&limit=3`,
+      `${NOMINATIM_BASE}/search?format=json&q=${encodeURIComponent(query)}&countrycodes=in&limit=3`,
       { 
         headers: { 'Accept-Language': 'en' },
-        signal: AbortSignal.timeout(3500)
+        signal: AbortSignal.timeout(9000)
       }
     );
     if (res.ok) {
@@ -129,8 +136,8 @@ export async function smartSearchLocation(rawQuery, biasCoords = null) {
 async function searchPhoton(query, bias) {
   const biasParams = bias ? `&lat=${bias.lat}&lon=${bias.lon}` : '';
   const pRes = await fetch(
-    `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}${biasParams}&limit=6`,
-    { signal: AbortSignal.timeout(3500) }
+    `${PHOTON_BASE}/api/?q=${encodeURIComponent(query)}${biasParams}&limit=6`,
+    { signal: AbortSignal.timeout(6000) }
   );
   if (!pRes.ok) return null;
   const pData = await pRes.json();
@@ -145,68 +152,50 @@ async function searchPhoton(query, bias) {
   return null;
 }
 
-/**
- * Fetches auto-complete suggestions from Photon & Open-Meteo with deduplication.
- * Safe for live keystroke typing (does not spam Nominatim).
- */
+const searchCache = new Map();
+const queryAliases = { piemr: 'Prestige Institute Engineering Indore' };
+const wordsFor = text => text.toLowerCase().replace(/&/g, ' and ').replace(/managementandresearch/g, 'management and research').replace(/[^\p{L}\p{N} ]/gu, ' ').split(/\s+/).filter(word => word && !STOPWORDS.has(word));
+
+// Search exact and shorter institutional names together, then rank by meaning and distance.
 export async function getLiveSearchSuggestions(rawQuery, biasCoords = null) {
-  const query = (rawQuery || '').trim();
-  if (!query || query.length < 2) return [];
-
+  const query = rawQuery.trim();
+  if (query.length < 2) return [];
   const bias = biasCoords || DEFAULT_INDIA_BIAS;
-  const results = [];
-  const seenCoords = new Set();
-
-  const addResult = (item) => {
-    if (!item || !item.lat || !item.lon) return;
-    const key = `${parseFloat(item.lat).toFixed(3)},${parseFloat(item.lon).toFixed(3)}`;
-    if (!seenCoords.has(key)) {
-      seenCoords.add(key);
-      results.push(item);
-    }
-  };
-
-  // 1. Fetch Photon autocomplete suggestions with bias
-  try {
-    const biasParams = bias ? `&lat=${bias.lat}&lon=${bias.lon}` : '';
-    const pRes = await fetch(
-      `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}${biasParams}&limit=6`,
-      { signal: AbortSignal.timeout(2800) }
-    );
-    if (pRes.ok) {
-      const pData = await pRes.json();
-      if (pData?.features) {
-        // Prioritize India
-        const inFeats = pData.features.filter(
-          f => f.properties?.countrycode === 'IN' || f.properties?.country === 'India' || !f.properties?.countrycode
-        );
-        const listToUse = inFeats.length > 0 ? inFeats : pData.features;
-        listToUse.forEach(f => addResult(formatPhotonResult(f)));
-      }
-    }
-  } catch (err) {
-    // Continue to next provider
-  }
-
-  // 2. Fetch Open-Meteo suggestions if fewer than 4 results
-  if (results.length < 4) {
+  const expanded = queryAliases[query.toLowerCase()] || query;
+  const words = wordsFor(expanded);
+  const queries = [...new Set([expanded, ...(words.length >= 4 ? [words.slice(0, 3).join(' ')] : [])])];
+  const key = query.toLowerCase() + ':' + Number(bias.lat).toFixed(2) + ':' + Number(bias.lon).toFixed(2);
+  if (searchCache.has(key)) return searchCache.get(key);
+  const batches = await Promise.all(queries.map(async term => {
     try {
-      const omRes = await fetch(
-        `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=5&language=en&format=json`,
-        { signal: AbortSignal.timeout(2500) }
-      );
-      if (omRes.ok) {
-        const omData = await omRes.json();
-        if (omData?.results) {
-          omData.results.forEach(r => addResult(formatOpenMeteoResult(r)));
-        }
-      }
-    } catch (err) {
-      // Ignore
-    }
+      const response = await fetch(PHOTON_BASE + '/api/?q=' + encodeURIComponent(term) + '&lat=' + bias.lat + '&lon=' + bias.lon + '&limit=12&lang=en', { signal: AbortSignal.timeout(6000) });
+      if (!response.ok) throw new Error('Place provider returned ' + response.status);
+      const data = await response.json();
+      return (data.features || []).map(formatPhotonResult);
+    } catch (error) { if (import.meta.env.DEV) console.warn('Place search request failed:', error.message); return null; }
+  }));
+  if (batches.every(batch => batch === null)) throw new Error('Place search could not connect. Please try again.');
+  const unique = new Map();
+  for (const place of batches.filter(Boolean).flat()) {
+    if (![place.lat, place.lon].every(Number.isFinite)) continue;
+    const key = place.primary.toLowerCase() + ':' + place.lat.toFixed(3) + ':' + place.lon.toFixed(3);
+    if (!unique.has(key)) unique.set(key, place);
   }
-
-  return results.slice(0, 6);
+  const score = place => {
+    const name = wordsFor(place.primary);
+    const address = wordsFor(place.display_name);
+    let score = 0;
+    for (const [index, word] of words.entries()) {
+      const weight = index === 0 ? 6 : /^(engineering|medical|hospital|airport|railway|university)$/.test(word) ? 4 : 1;
+      if (name.some(token => token === word || (word.length >= 4 && token.startsWith(word)))) score += weight;
+      else if (address.includes(word)) score += weight * 0.3;
+    }
+    const distance = Math.hypot((place.lat - bias.lat) * 111, (place.lon - bias.lon) * 100);
+    return score - Math.min(distance / 100, 3);
+  };
+  const places = [...unique.values()].filter(place => wordsFor(place.display_name).some(token => token === words[0] || (words[0]?.length >= 4 && token.startsWith(words[0]))) && score(place) > 0).sort((a,b) => score(b) - score(a)).slice(0,8);
+  if (places.length) { searchCache.set(key, places); if (searchCache.size > 50) searchCache.delete(searchCache.keys().next().value); }
+  return places;
 }
 
 /**
@@ -214,15 +203,16 @@ export async function getLiveSearchSuggestions(rawQuery, biasCoords = null) {
  * Primary: Nominatim with timeout. Fallback: BigDataCloud.
  */
 export async function reverseGeocodeLocation(lat, lng) {
-  if (!lat || !lng) return 'Unknown Location';
+  lat = Number(lat); lng = Number(lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return { short_name: 'Unknown location', display_name: 'Unknown location' };
 
   // 1. Try Nominatim reverse
   try {
     const res = await fetch(
-      `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}`,
+      `${NOMINATIM_BASE}/reverse?format=json&lat=${lat}&lon=${lng}`,
       {
         headers: { 'Accept-Language': 'en' },
-        signal: AbortSignal.timeout(2800)
+        signal: AbortSignal.timeout(5000)
       }
     );
     if (res.ok) {
@@ -241,6 +231,18 @@ export async function reverseGeocodeLocation(lat, lng) {
   } catch (e) {
     // Continue to BigDataCloud
   }
+
+  // Nearby named buildings are more useful than a city-only fallback for an entrance pin.
+  try {
+    const response = await fetch(`${PHOTON_BASE}/reverse?lat=${lat}&lon=${lng}&limit=1`, { signal: AbortSignal.timeout(5000) });
+    if (response.ok) {
+      const data = await response.json();
+      if (data.features?.length) {
+        const nearest = formatPhotonResult(data.features[0]);
+        return { short_name: `Near ${nearest.primary}`, display_name: `Near ${nearest.display_name}` };
+      }
+    }
+  } catch { /* Keep coordinates selectable when address services are unavailable. */ }
 
   // 2. Fallback to BigDataCloud reverse geocode (high reliability, no auth needed)
   try {
@@ -456,3 +458,20 @@ function formatOpenMeteoResult(r) {
     secondary: secondary
   };
 }
+
+// Nearby named places for an empty search, biased to the selected map position.
+export async function getNearbyLocations(lat, lng) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return [];
+  const key = lat.toFixed(3) + ',' + lng.toFixed(3);
+  if (nearbyCache.has(key)) return nearbyCache.get(key);
+  try {
+    const response = await fetch(PHOTON_BASE + '/reverse?lat=' + lat + '&lon=' + lng + '&limit=6', { signal: AbortSignal.timeout(6000) });
+    if (!response.ok) return [];
+    const data = await response.json();
+    const places = (data.features || []).map(formatPhotonResult);
+    nearbyCache.set(key, places);
+    if (nearbyCache.size > 30) nearbyCache.delete(nearbyCache.keys().next().value);
+    return places;
+  } catch { return []; }
+}
+const nearbyCache = new Map();

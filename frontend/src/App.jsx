@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import CustomerView from './components/CustomerView';
 import WorkerView from './components/WorkerView';
 import AdminView from './components/AdminView';
@@ -7,6 +7,9 @@ import LandingPage from './components/LandingPage';
 import ProfileSettings from './components/ProfileSettings';
 import InteractiveMap from './components/InteractiveMap';
 import { apiUrl } from './utils/api';
+import { reverseGeocodeLocation } from './utils/geoService';
+import useLiveLocation from './hooks/useLiveLocation';
+import { findWorker } from './utils/navigation';
 import { ShieldCheck, Truck, Users, Landmark, MapPin, LogOut, User, Sun, Moon, Wrench, Sparkles } from 'lucide-react';
 
 export default function App() {
@@ -22,6 +25,11 @@ export default function App() {
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [theme, setTheme] = useState('light');
   const [showProfile, setShowProfile] = useState(false);
+  const [mapExpanded, setMapExpanded] = useState(false);
+  const lastLocationUpload = useRef(0);
+  const gps = useLiveLocation();
+  const [followGps, setFollowGps] = useState(false);
+  const gpsGeocode = useRef({ version: 0, time: 0, lat: null, lng: null });
   const [bookingLocation, setBookingLocationState] = useState(() => {
     try {
       const saved = localStorage.getItem('worknest_last_coords');
@@ -42,6 +50,8 @@ export default function App() {
   });
 
   const setBookingLocation = useCallback((coords) => {
+    setFollowGps(false);
+    gpsGeocode.current.version++;
     setBookingLocationState(coords);
     if (coords && coords.length >= 2) {
       try {
@@ -49,6 +59,48 @@ export default function App() {
       } catch (e) {}
     }
   }, []);
+
+  const requestLocation = () => { setFollowGps(true); gps.start(); };
+  const pauseLocationFollow = () => { setFollowGps(false); gpsGeocode.current.version++; };
+  const showWorkerNavigation = () => { setMobileTab('map'); setMapExpanded(true); if (gps.status !== 'tracking') gps.start(); };
+  const openJobDetails = () => { setMobileTab('form'); setMapExpanded(false); setShowProfile(false); };
+  useEffect(() => {
+    if (currentUser?.role === 'WORKER' && activeBooking?.id && ['ACCEPTED','EN_ROUTE'].includes(activeBooking.status)) {
+      setMobileTab('map'); setMapExpanded(true);
+      if (gps.status === 'idle') gps.start();
+    }
+  }, [currentUser?.role, activeBooking?.id]);
+  useEffect(() => {
+    if (currentUser?.role !== 'WORKER' || !gps.position || Date.now() - lastLocationUpload.current < 5000) return;
+    const worker = findWorker(workers, currentUser);
+    if (!worker) return;
+    lastLocationUpload.current = Date.now();
+    const params = new URLSearchParams({ latitude: gps.position.lat, longitude: gps.position.lng });
+    const path = activeBooking && ['ACCEPTED','EN_ROUTE','ACTIVE'].includes(activeBooking.status)
+      ? `/api/bookings/${activeBooking.id}/location?${params}` : `/api/workers/${worker.id}/location?${params}`;
+    fetch(apiUrl(path), {method:'PUT'}).catch(error => console.warn('Location sharing interrupted:', error));
+  }, [gps.position, currentUser, workers, activeBooking]);
+  useEffect(() => {
+    if (!followGps || !gps.position || activeBooking) return;
+    const { lat, lng } = gps.position;
+    setBookingLocationState([lat, lng]);
+    try { localStorage.setItem('worknest_last_coords', JSON.stringify({ lat, lng })); } catch { /* Storage can be disabled. */ }
+    const last = gpsGeocode.current;
+    if (Date.now() - last.time < 15000 && Math.abs(lat - last.lat) < 0.0003 && Math.abs(lng - last.lng) < 0.0003) return;
+    const version = ++last.version;
+    Object.assign(last, { time: Date.now(), lat, lng });
+    setServiceAddressState(`${lat.toFixed(5)}, ${lng.toFixed(5)}`);
+    reverseGeocodeLocation(lat, lng).then(result => {
+      if (gpsGeocode.current.version === version) {
+        setServiceAddressState(result.display_name);
+        try { localStorage.setItem('worknest_last_address', result.display_name); } catch { /* Storage can be disabled. */ }
+      }
+    });
+  }, [gps.position, followGps, activeBooking]);
+  useEffect(() => {
+    if (!followGps || activeBooking) gpsGeocode.current.version++;
+  }, [followGps, activeBooking]);
+  useEffect(() => () => { gpsGeocode.current.version++; }, []);
 
   const setServiceAddress = useCallback((addr) => {
     setServiceAddressState(addr);
@@ -104,6 +156,8 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    gps.stop();
+    setMapExpanded(false);
     setCurrentUser(null);
     setActiveBooking(null);
     try {
@@ -160,9 +214,8 @@ export default function App() {
 
   // 4. Accept Broadcast Job (as Worker)
   const handleAcceptJob = async (jobId) => {
-    const activeWorker = workers.find(w => w.userId == currentUser?.id) || 
-                         workers.find(w => w.name?.toLowerCase() === currentUser?.name?.toLowerCase());
-    const workerId = activeWorker ? activeWorker.id : currentUser?.id;
+    const activeWorker = findWorker(workers, currentUser);
+    const workerId = activeWorker?.id;
     if (!workerId) {
       alert('Unable to identify active worker profile.');
       return;
@@ -175,7 +228,7 @@ export default function App() {
         const updated = await response.json();
         setActiveBooking(updated);
         setSelectedJob(null);
-        setMobileTab('form'); // Switch back to active task in cockpit
+        showWorkerNavigation();
         handleRefreshAll();
         return updated;
       } else {
@@ -401,7 +454,7 @@ export default function App() {
           {/* Role Navigation Button (Desktop) */}
           {userRole === 'CUSTOMER' && (
             <button
-              onClick={() => { setShowProfile(false); setMobileTab('form'); }}
+              onClick={() => { setShowProfile(false); setMobileTab('form'); setMapExpanded(false); }}
               className={`btn navbar-desktop-only ${!showProfile && mobileTab === 'form' ? 'btn-customer' : 'btn-secondary'}`}
               style={{ padding: '7px 12px', fontSize: '0.8rem', borderRadius: '10px' }}
             >
@@ -411,7 +464,7 @@ export default function App() {
 
           {userRole === 'WORKER' && (
             <button
-              onClick={() => { setShowProfile(false); setMobileTab('form'); }}
+              onClick={() => { setShowProfile(false); setMobileTab('form'); setMapExpanded(false); }}
               className={`btn navbar-desktop-only ${!showProfile && mobileTab === 'form' ? 'btn-worker' : 'btn-secondary'}`}
               style={{ padding: '7px 12px', fontSize: '0.8rem', borderRadius: '10px' }}
             >
@@ -420,7 +473,7 @@ export default function App() {
           )}
 
           <button
-            onClick={() => setShowProfile(!showProfile)}
+            onClick={() => { setMapExpanded(false); setShowProfile(!showProfile); }}
             className={`btn navbar-desktop-only ${showProfile ? 'btn-primary' : 'btn-secondary'}`}
             style={{ padding: '7px 12px', fontSize: '0.8rem', borderRadius: '10px' }}
             title="Profile & History"
@@ -440,7 +493,7 @@ export default function App() {
       </header>
 
       {/* Main Multi-Panel Workspace */}
-      <main className={`main-content mobile-tab-${mobileTab}`}>
+      <main className={`main-content mobile-tab-${mobileTab} ${mapExpanded ? 'navigation-mode' : ''}`}>
         {/* Control Panel Section */}
         <section className="control-panel-section">
           {showProfile ? (
@@ -451,6 +504,10 @@ export default function App() {
             <>
               {userRole === 'CUSTOMER' && (
                 <CustomerView
+                  onLocationInteraction={pauseLocationFollow}
+                  onLocate={requestLocation}
+                  gpsStatus={gps.status}
+                  gpsError={gps.error}
                   workers={workers}
                   activeBooking={activeBooking}
                   setActiveBooking={setActiveBooking}
@@ -465,6 +522,7 @@ export default function App() {
               )}
               {userRole === 'WORKER' && (
                 <WorkerView
+                  onNavigate={showWorkerNavigation}
                   workers={workers}
                   activeBooking={activeBooking}
                   setActiveBooking={setActiveBooking}
@@ -484,6 +542,13 @@ export default function App() {
         {/* Live-Map Simulator HUD Section */}
         <section className="map-panel-section">
           <InteractiveMap
+            expanded={mapExpanded}
+            onToggleExpand={() => setMapExpanded(value => !value)}
+            onLocationInteraction={pauseLocationFollow}
+            deviceLocation={gps.position}
+            gpsStatus={gps.status}
+            gpsError={gps.error}
+            onLocate={requestLocation}
             workers={workers}
             activeBooking={activeBooking}
             setActiveBooking={setActiveBooking}
@@ -498,7 +563,7 @@ export default function App() {
             onAcceptJob={handleAcceptJob}
             refreshData={handleRefreshAll}
             mobileTab={mobileTab}
-            onSwitchToForm={() => setMobileTab('form')}
+            onSwitchToForm={openJobDetails}
           />
         </section>
       </main>
@@ -516,7 +581,7 @@ export default function App() {
 
         <button
           type="button"
-          onClick={() => { setMobileTab('form'); setShowProfile(false); }}
+          onClick={() => { setMobileTab('form'); setMapExpanded(false); setShowProfile(false); }}
           className={`mobile-tab-btn ${mobileTab === 'form' && !showProfile ? 'active' : ''}`}
         >
           {userRole === 'WORKER' ? <Truck size={18} /> : <Wrench size={18} />}

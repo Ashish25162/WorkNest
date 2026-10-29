@@ -3,6 +3,10 @@ import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 import fs from 'fs'
 import path from 'path'
+import { Agent } from 'node:https'
+
+// Some local networks advertise IPv6 routes that these providers cannot reach.
+const locationProxyAgent = new Agent({ family: 4, keepAlive: true })
 
 // Check for local SSL certificate (enables secure context for mobile GPS)
 const certKeyPath = path.resolve(__dirname, 'cert.key')
@@ -48,6 +52,49 @@ export default defineConfig({
     https: httpsConfig,
     allowedHosts: true,
     proxy: {
+      '/_map/style': {
+        agent: locationProxyAgent,
+        target: 'https://tile.openstreetmap.de',
+        changeOrigin: true,
+        rewrite: path => path.replace(/^\/_map\/style/, ''),
+      },
+      '/_geo/route': {
+        agent: locationProxyAgent,
+        target: 'https://router.project-osrm.org',
+        changeOrigin: true,
+        headers: { 'User-Agent': 'WorkNest-LocalDev/1.0', 'Referer': 'http://localhost:5173/' },
+        rewrite: path => path.replace(/^\/_geo\/route/, ''),
+      },
+      '/_map/tiles': {
+        agent: locationProxyAgent,
+        target: 'https://tile.openstreetmap.org',
+        changeOrigin: true,
+        rewrite: path => path.replace(/^\/_map\/tiles/, ''),
+      },
+      '/_map/fallback': {
+        agent: locationProxyAgent,
+        target: 'https://basemaps.cartocdn.com',
+        changeOrigin: true,
+        rewrite: path => path.replace(/^\/_map\/fallback/, '/rastertiles/voyager'),
+      },
+      '/_geo/photon': {
+        agent: locationProxyAgent,
+        target: 'https://photon.komoot.io',
+        changeOrigin: true,
+        rewrite: path => path.replace(/^\/_geo\/photon/, ''),
+      },
+      '/_geo/nominatim': {
+        agent: locationProxyAgent,
+        target: 'https://nominatim.openstreetmap.org',
+        changeOrigin: true,
+        rewrite: path => path.replace(/^\/_geo\/nominatim/, ''),
+      },
+      '/_geo/meteo': {
+        agent: locationProxyAgent,
+        target: 'https://geocoding-api.open-meteo.com',
+        changeOrigin: true,
+        rewrite: path => path.replace(/^\/_geo\/meteo/, ''),
+      },
       '/api': {
         target: 'http://127.0.0.1:8080',
         changeOrigin: true,

@@ -7,8 +7,10 @@ import {
 } from 'lucide-react';
 import ChatSystem from './ChatSystem';
 import { apiUrl } from '../utils/api';
+import { findWorker, navigationUrl } from '../utils/navigation';
 
 export default function WorkerView({ 
+  onNavigate = null,
   workers = [], 
   activeBooking, 
   setActiveBooking, 
@@ -29,20 +31,11 @@ export default function WorkerView({
   const [isVerifying, setIsVerifying] = useState(false);
 
   // Helper: Open turn-by-turn navigation in Google Maps app or browser
-  const openInGoogleMaps = (lat, lng, addressHint = '') => {
-    if (!lat || !lng) {
-      alert('Destination coordinates not found for this work request.');
-      return;
-    }
-    const cleanLat = parseFloat(lat);
-    const cleanLng = parseFloat(lng);
-    const url = `https://www.google.com/maps/dir/?api=1&destination=${cleanLat},${cleanLng}&travelmode=driving`;
-    window.open(url, '_blank', 'noopener,noreferrer');
+  const openInGoogleMaps = (lat,lng) => {
+    const url = navigationUrl(lat,lng);
+    if (url) window.open(url, '_blank', 'noopener,noreferrer');
   };
-
-  // Derive activeWorker from logged-in user
-  const activeWorker = workers.find(w => w.userId == currentUser?.id) || 
-                       workers.find(w => w.name?.toLowerCase() === currentUser?.name?.toLowerCase());
+  const activeWorker = findWorker(workers,currentUser);
 
   useEffect(() => {
     if (activeWorker) {
@@ -108,29 +101,6 @@ export default function WorkerView({
     }
   };
 
-  // Real-time GPS tracking when en route
-  useEffect(() => {
-    if (activeBooking && activeBooking.status === 'EN_ROUTE') {
-      if ('geolocation' in navigator) {
-        const watchId = navigator.geolocation.watchPosition(
-          async (position) => {
-            const { latitude, longitude } = position.coords;
-            try {
-              await fetch(apiUrl(`/api/bookings/${activeBooking.id}/location?latitude=${latitude}&longitude=${longitude}`), {
-                method: 'PUT'
-              });
-            } catch (e) {
-              console.error('Failed to update live location', e);
-            }
-          },
-          (error) => console.warn('Geolocation error:', error),
-          { enableHighAccuracy: true, maximumAge: 10000, timeout: 5000 }
-        );
-        return () => navigator.geolocation.clearWatch(watchId);
-      }
-    }
-  }, [activeBooking?.status, activeBooking?.id]);
-
   // Accept Booking
   const handleAcceptJob = async (jobId) => {
     try {
@@ -140,6 +110,7 @@ export default function WorkerView({
       if (response.ok) {
         const updated = await response.json();
         setActiveBooking(updated);
+        onNavigate?.();
         refreshData();
       } else {
         const text = await response.text();
@@ -161,6 +132,7 @@ export default function WorkerView({
       if (response.ok) {
         const updated = await response.json();
         setActiveBooking(updated);
+        onNavigate?.();
         refreshData();
       }
     } catch (err) {
