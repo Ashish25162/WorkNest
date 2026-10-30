@@ -5,10 +5,15 @@ import {
   Settings, Wrench, CheckCircle2, ChevronRight, User, AlertCircle, Sparkles, Navigation
 } from 'lucide-react';
 import ChatSystem from './ChatSystem';
-import { smartSearchLocation, getLiveSearchSuggestions, reverseGeocodeLocation, getApproximateIpLocation } from '../utils/geoService';
+import { smartSearchLocation } from '../utils/geoService';
 import { apiUrl } from '../utils/api';
+import useLocationSearch from '../hooks/useLocationSearch';
 
 export default function CustomerView({
+  onLocate = null,
+  onLocationInteraction = null,
+  gpsStatus = 'idle',
+  gpsError = null,
   workers = [],
   activeBooking,
   setActiveBooking,
@@ -26,12 +31,11 @@ export default function CustomerView({
   const [selectedProfession, setSelectedProfession] = useState('Electrician');
   const [showChat, setShowChat] = useState(false);
   const [hasUnread, setHasUnread] = useState(false);
-  const [searchLocationQuery, setSearchLocationQuery] = useState('');
+  const locationSearch = useLocationSearch(bookingLocation);
+  const { query: searchLocationQuery, setQuery: setSearchLocationQuery, suggestions: searchSuggestions, open: showSearchSuggestions } = locationSearch;
   const [isSearchingLocation, setIsSearchingLocation] = useState(false);
-  const [searchSuggestions, setSearchSuggestions] = useState([]);
-  const [showSearchSuggestions, setShowSearchSuggestions] = useState(false);
-  const [isGpsLocating, setIsGpsLocating] = useState(false);
-  const searchSuggestionsTimerRef = useRef(null);
+  const isGpsLocating = gpsStatus === 'locating';
+  const locationRequest = useRef(0);
 
   const availableProsCount = workers.filter(w => w.available).length;
 
@@ -59,21 +63,25 @@ export default function CustomerView({
 
   // Synchronize input text with serviceAddress when address is discovered by map/GPS
   useEffect(() => {
-    if (serviceAddress && !searchLocationQuery) {
+    if (serviceAddress && !locationSearch.open) {
       setSearchLocationQuery(serviceAddress);
     }
-  }, [serviceAddress]);
+  }, [serviceAddress, locationSearch.open, setSearchLocationQuery]);
+
+  useEffect(() => { locationRequest.current++; locationSearch.close(); }, [bookingLocation]);
 
   // Search location manually and auto-pin map using smart multi-tier geocoder
   const handleSearchLocation = async (overrideQuery = null) => {
     const q = (overrideQuery || searchLocationQuery || '').trim();
     if (!q) return;
     setIsSearchingLocation(true);
-    setShowSearchSuggestions(false);
+    locationSearch.close();
+    const version = ++locationRequest.current;
     try {
       const biasCoords = bookingLocation ? { lat: bookingLocation[0], lon: bookingLocation[1] } : null;
       const result = await smartSearchLocation(q, biasCoords);
       setIsSearchingLocation(false);
+      if (version !== locationRequest.current) return;
       if (result) {
         const lat = result.lat;
         const lng = result.lon;
@@ -99,35 +107,13 @@ export default function CustomerView({
     if (setBookingLocation) setBookingLocation([lat, lng]);
     if (setServiceAddress) setServiceAddress(place.display_name);
     setSearchLocationQuery(place.short_name || place.display_name);
-    setSearchSuggestions([]);
-    setShowSearchSuggestions(false);
+    locationSearch.close();
   };
 
-  const handleSearchInputChange = (e) => {
-    const val = e.target.value;
-    setSearchLocationQuery(val);
-    if (searchSuggestionsTimerRef.current) clearTimeout(searchSuggestionsTimerRef.current);
-    if (!val || val.trim().length < 2) {
-      setSearchSuggestions([]);
-      setShowSearchSuggestions(false);
-      return;
-    }
-    searchSuggestionsTimerRef.current = setTimeout(async () => {
-      try {
-        const biasCoords = bookingLocation ? { lat: bookingLocation[0], lon: bookingLocation[1] } : null;
-        const list = await getLiveSearchSuggestions(val, biasCoords);
-        if (Array.isArray(list) && list.length > 0) {
-          setSearchSuggestions(list);
-          setShowSearchSuggestions(true);
-        } else {
-          setSearchSuggestions([]);
-          setShowSearchSuggestions(false);
-        }
-      } catch (err) {
-        setSearchSuggestions([]);
-        setShowSearchSuggestions(false);
-      }
-    }, 220);
+  const handleSearchInputChange = e => {
+    onLocationInteraction?.();
+    locationRequest.current++;
+    locationSearch.change(e.target.value);
   };
 
   const quickCities = [
@@ -142,62 +128,10 @@ export default function CustomerView({
     if (setBookingLocation) setBookingLocation([c.lat, c.lng]);
     if (setServiceAddress) setServiceAddress(c.addr);
     setSearchLocationQuery(c.addr);
-    setSearchSuggestions([]);
-    setShowSearchSuggestions(false);
+    locationSearch.close();
   };
 
-  const handleUseCurrentGpsLocation = async () => {
-    setIsGpsLocating(true);
-
-    const applyCoords = async (lat, lng, addressHint = null) => {
-      if (setBookingLocation) setBookingLocation([lat, lng]);
-      if (addressHint) {
-        if (setServiceAddress) setServiceAddress(addressHint);
-        setSearchLocationQuery(addressHint);
-      } else {
-        try {
-          const rev = await reverseGeocodeLocation(lat, lng);
-          const fullAddr = rev.display_name || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
-          if (setServiceAddress) setServiceAddress(fullAddr);
-          setSearchLocationQuery(rev.short_name || fullAddr);
-        } catch (e) {
-          setSearchLocationQuery(`${lat.toFixed(4)}, ${lng.toFixed(4)}`);
-        }
-      }
-      setIsGpsLocating(false);
-    };
-
-    if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        async (pos) => {
-          await applyCoords(pos.coords.latitude, pos.coords.longitude);
-        },
-        async (err) => {
-          console.warn('GPS position failed, falling back to IP location:', err?.message);
-          try {
-            const ipLoc = await getApproximateIpLocation();
-            if (ipLoc && ipLoc.lat && ipLoc.lng) {
-              await applyCoords(ipLoc.lat, ipLoc.lng, ipLoc.display_name || ipLoc.short_name);
-              return;
-            }
-          } catch (e) {}
-          setIsGpsLocating(false);
-          alert('Could not detect location. Please search your area or pick a city chip.');
-        },
-        { enableHighAccuracy: true, timeout: 4000, maximumAge: 30000 }
-      );
-    } else {
-      try {
-        const ipLoc = await getApproximateIpLocation();
-        if (ipLoc && ipLoc.lat && ipLoc.lng) {
-          await applyCoords(ipLoc.lat, ipLoc.lng, ipLoc.display_name || ipLoc.short_name);
-          return;
-        }
-      } catch (e) {}
-      setIsGpsLocating(false);
-      alert('Geolocation not supported. Please search your area or pick a city chip.');
-    }
-  };
+  const handleUseCurrentGpsLocation = () => onLocate?.();
 
   // Duration options to price mapping
   const durationOptions = [
@@ -793,7 +727,7 @@ export default function CustomerView({
             <button
               type="button"
               onClick={handleUseCurrentGpsLocation}
-              disabled={isGpsLocating}
+              disabled={isGpsLocating || gpsStatus === 'locating'}
               style={{
                 background: 'none',
                 border: 'none',
@@ -810,7 +744,7 @@ export default function CustomerView({
               title="Pin map to current GPS location"
             >
               <Navigation size={13} style={{ transform: isGpsLocating ? 'rotate(45deg)' : 'none', transition: 'transform 0.3s' }} />
-              {isGpsLocating ? 'Pinning GPS...' : 'Use My GPS'}
+              {isGpsLocating || gpsStatus === 'locating' ? 'Finding GPS...' : gpsStatus === 'tracking' ? 'Live GPS' : 'Use My GPS'}
             </button>
           </div>
 
@@ -822,7 +756,7 @@ export default function CustomerView({
                 className="form-input"
                 value={searchLocationQuery}
                 onChange={handleSearchInputChange}
-                onFocus={() => { if (searchSuggestions.length > 0) setShowSearchSuggestions(true); }}
+                onFocus={() => { onLocationInteraction?.(); locationSearch.focus(); }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
                     e.preventDefault();
@@ -839,7 +773,7 @@ export default function CustomerView({
               {searchLocationQuery && (
                 <button
                   type="button"
-                  onClick={() => { setSearchLocationQuery(''); setSearchSuggestions([]); setShowSearchSuggestions(false); }}
+                  onClick={() => locationSearch.change('')}
                   style={{
                     position: 'absolute', right: '12px', top: '50%', transform: 'translateY(-50%)',
                     background: 'transparent', border: 'none', color: '#94a3b8',
@@ -868,15 +802,22 @@ export default function CustomerView({
           </div>
 
           {/* Live search suggestions dropdown */}
-          {showSearchSuggestions && searchSuggestions.length > 0 && (
+          {gpsError && <div role="alert" style={{ color: 'var(--danger)', fontSize: '0.8rem', marginTop: 8 }}>{gpsError}</div>}
+          {showSearchSuggestions && (
             <div style={{
               position: 'absolute', top: '100%', left: 0, right: 0, marginTop: '6px',
               background: 'white', borderRadius: '12px', overflow: 'hidden',
               boxShadow: '0 10px 25px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,0,0,0.06)',
               zIndex: 100, maxHeight: '240px', overflowY: 'auto'
             }}>
+              <div role="status" style={{ padding: '10px 14px', fontSize: '0.75rem', color: '#64748b' }}>
+                {locationSearch.loading ? 'Finding places…' : searchSuggestions.length ? (locationSearch.nearby ? 'Nearby places • choose a location' : 'Search results') : 'No places found. Try another landmark or tap the map.'}
+              </div>
               {searchSuggestions.map((item, idx) => (
                 <div
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={e => { if (e.key === 'Enter') handleSelectSuggestion(item); }}
                   key={item.place_id || idx}
                   onClick={() => handleSelectSuggestion(item)}
                   style={{

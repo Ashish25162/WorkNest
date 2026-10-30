@@ -315,7 +315,7 @@ body {
 .main-content {
   flex: 1;
   display: grid;
-  grid-template-columns: 460px 1fr;
+  grid-template-columns: minmax(0, 460px) minmax(0, 1fr);
   height: calc(100vh - 65px);
   overflow: hidden;
 }
@@ -335,10 +335,21 @@ body {
 }
 
 .map-panel-section {
+  min-width: 0;
+  min-height: 0;
   height: 100%;
   position: relative;
   width: 100%;
   overflow: hidden;
+}
+
+.worknest-map .leaflet-tile { max-width: none !important; max-height: none !important; }
+.worknest-map .doorstep-map-pin { background: transparent; border: 0; cursor: grab; }
+.worknest-map .doorstep-map-pin:active { cursor: grabbing; }
+.map-load-status {
+  position: absolute; top: 116px; left: 16px; right: 72px; z-index: 1000;
+  padding: 10px 14px; border-radius: 12px; background: white; color: #334155;
+  font-size: 0.8rem; box-shadow: 0 2px 12px #0f172a18;
 }
 
 /* Mobile Tab Switcher (Visible only <= 860px) */
